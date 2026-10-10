@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test helper and workflow builder (no screen capture)
+        run: python3 -m unittest -v
+      - name: Check installer syntax and generate workflow
+        run: |
+          sh -n install.sh
+          python3 build_shortcut.py "build/Screenshot with Note.unsigned.shortcut"
+      - name: Check macOS installer in an isolated home directory
+        if: runner.os == 'macOS'
+        run: |
+          export HOME="$(mktemp -d)"
+          ./install.sh
+          "$HOME/.local/bin/screenshot-note" --help
+          cmp screenshot_note.py "$HOME/.local/share/screenshot-note/screenshot_note.py"
