@@ -7,6 +7,7 @@ in a comment is evaluated as shell code. Uses only Python's standard library.
 """
 
 import argparse
+import ctypes
 from datetime import datetime
 from pathlib import Path
 import os
@@ -93,8 +94,32 @@ def publish_image(source: Path, folder: Path, captured_at: datetime) -> Path:
         return image
 
 
+def ensure_capture_access() -> None:
+    """Check access without capturing, requesting, or changing permissions."""
+    if sys.platform != "darwin":
+        # Runtime capture is macOS-only; tests may mock it on other platforms.
+        return
+    try:
+        graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        preflight = graphics.CGPreflightScreenCaptureAccess
+        preflight.argtypes = []
+        preflight.restype = ctypes.c_bool
+        allowed = preflight()
+    except (OSError, AttributeError) as error:
+        raise ScreenshotError("Cannot check Screen Recording permission; no capture was started") from error
+    if not allowed:
+        raise ScreenshotError(
+            "Screen Recording permission is missing for the app invoking this Shortcut. "
+            "Open System Settings > Privacy & Security > Screen Recording and enable "
+            "that app if you wish to grant access. When invoked from an app's Services "
+            "menu or hotkey, macOS may require that app (not just Shortcuts). "
+            "You may need to quit and reopen it. No screenshot was saved."
+        )
+
+
 def capture(folder: Path) -> Optional[Path]:
     """Return the captured path, or None when the user cancels/uses clipboard."""
+    ensure_capture_access()
     folder = ensure_folder(folder)
     with tempfile.TemporaryDirectory(prefix="screenshot-note-") as staging:
         image = Path(staging) / "capture.png"

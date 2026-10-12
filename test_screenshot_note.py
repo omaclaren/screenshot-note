@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import build_shortcut
+import build_wiring_check
 import screenshot_note as app
 
 PNG = base64.b64decode(
@@ -194,7 +195,7 @@ class ScreenshotNoteTests(unittest.TestCase):
 
     def test_cancel_creates_nothing(self):
         destination = Path(self.temp.name) / "cancelled"
-        with patch("screenshot_note.subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+        with patch("screenshot_note.ensure_capture_access"), patch("screenshot_note.subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "")):
             self.assertIsNone(app.capture(destination))
         self.assertEqual(list(destination.iterdir()), [])
 
@@ -204,7 +205,7 @@ class ScreenshotNoteTests(unittest.TestCase):
             self.assertEqual(args[:5], ["/usr/sbin/screencapture", "-i", "-x", "-t", "png"])
             Path(args[-1]).write_bytes(PNG)
             return subprocess.CompletedProcess(args, 0, "", "")
-        with patch("screenshot_note.subprocess.run", side_effect=fake_capture):
+        with patch("screenshot_note.ensure_capture_access"), patch("screenshot_note.subprocess.run", side_effect=fake_capture):
             result = app.capture(destination)
         self.assertEqual(list(destination.iterdir()), [result])
         self.assertEqual(result.read_bytes(), PNG)
@@ -212,7 +213,7 @@ class ScreenshotNoteTests(unittest.TestCase):
     def test_permission_error_is_not_mistaken_for_cancel(self):
         destination = Path(self.temp.name) / "denied"
         result = subprocess.CompletedProcess([], 1, "", "could not create image from display")
-        with patch("screenshot_note.subprocess.run", return_value=result), self.assertRaises(app.ScreenshotError):
+        with patch("screenshot_note.ensure_capture_access"), patch("screenshot_note.subprocess.run", return_value=result), self.assertRaises(app.ScreenshotError):
             app.capture(destination)
         self.assertEqual(list(destination.iterdir()), [])
 
@@ -223,7 +224,7 @@ class ScreenshotNoteTests(unittest.TestCase):
 
     def test_native_shortcut_uses_exact_capture_and_multiline_input(self):
         workflow = build_shortcut.build()
-        capture, condition, ask, payload, save, end = [a["WFWorkflowActionParameters"] for a in workflow["WFWorkflowActions"]]
+        capture, condition, path_text, ask, payload, save, end = [a["WFWorkflowActionParameters"] for a in workflow["WFWorkflowActions"]]
         self.assertEqual(condition["WFCondition"], 100)
         # Conditional subjects need a picker-state wrapper; a bare token
         # imports as an unbound "Input" selector on macOS 14. Shell inputs
@@ -231,14 +232,106 @@ class ScreenshotNoteTests(unittest.TestCase):
         self.assertEqual(condition["WFInput"]["Type"], "Variable")
         self.assertEqual(condition["WFInput"]["Variable"]["Value"]["OutputUUID"], capture["UUID"])
         self.assertTrue(ask["WFAllowsMultilineText"])
+        snapshot = path_text["WFTextActionText"]["Value"]
+        self.assertEqual(snapshot["string"], "\ufffc")
+        self.assertEqual(snapshot["attachmentsByRange"]["{0, 1}"]["OutputUUID"], capture["UUID"])
         value = payload["WFTextActionText"]["Value"]
         self.assertEqual(value["string"], "\ufffc\n\ufffc")
-        self.assertEqual(value["attachmentsByRange"]["{0, 1}"]["OutputUUID"], capture["UUID"])
+        self.assertEqual(value["attachmentsByRange"]["{0, 1}"]["OutputUUID"], path_text["UUID"])
+        self.assertEqual(value["attachmentsByRange"]["{0, 1}"]["OutputName"], "Text")
         self.assertEqual(value["attachmentsByRange"]["{2, 1}"]["OutputUUID"], ask["UUID"])
         self.assertEqual(save["Input"]["WFSerializationType"], "WFTextTokenAttachment")
         self.assertEqual(save["Input"]["Value"]["OutputUUID"], payload["UUID"])
         self.assertEqual(end["GroupingIdentifier"], condition["GroupingIdentifier"])
         self.assertFalse(save["RunAsRoot"])
+
+    def test_no_shell_output_reference_survives_past_prompt(self):
+        actions = build_shortcut.build()["WFWorkflowActions"]
+        capture_id = actions[0]["WFWorkflowActionParameters"]["UUID"]
+        ask_index = next(i for i, action in enumerate(actions) if action["WFWorkflowActionIdentifier"] == "is.workflow.actions.ask")
+        def references(value):
+            if isinstance(value, dict):
+                if value.get("Type") == "ActionOutput":
+                    yield value.get("OutputUUID")
+                for child in value.values():
+                    yield from references(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from references(child)
+        self.assertNotIn(capture_id, list(references(actions[ask_index:])))
+        self.assertEqual(actions[ask_index - 1]["WFWorkflowActionIdentifier"], "is.workflow.actions.gettext")
+
+    def test_delayed_native_check_uses_production_path_snapshot(self):
+        workflow, image = build_wiring_check.build_check(self.folder / "native fixture", delay=180)
+        actions = workflow["WFWorkflowActions"]
+        self.assertEqual(image.read_bytes(), build_wiring_check.PNG)
+        self.assertEqual(actions[2]["WFWorkflowActionIdentifier"], "is.workflow.actions.gettext")
+        self.assertEqual(actions[3]["WFWorkflowActionIdentifier"], "is.workflow.actions.delay")
+        self.assertEqual(actions[3]["WFWorkflowActionParameters"]["WFDelayTime"], 180)
+        path_id = actions[2]["WFWorkflowActionParameters"]["UUID"]
+        value = actions[5]["WFWorkflowActionParameters"]["WFTextActionText"]["Value"]
+        self.assertEqual(value["attachmentsByRange"]["{0, 1}"]["OutputUUID"], path_id)
+        self.assertEqual(value["attachmentsByRange"]["{2, 1}"]["OutputName"], "Text")
+        self.assertEqual(actions[4]["WFWorkflowActionParameters"]["WFTextActionText"], build_wiring_check.COMMENT)
+        self.assertEqual(workflow["WFWorkflowTypes"], [])
+        self.assertEqual(workflow["WFQuickActionSurfaces"], [])
+
+    def test_native_check_can_retain_real_multiline_prompt(self):
+        workflow, _ = build_wiring_check.build_check(self.folder / "interactive fixture", interactive=True)
+        ask = workflow["WFWorkflowActions"][3]
+        self.assertEqual(ask["WFWorkflowActionIdentifier"], "is.workflow.actions.ask")
+        self.assertTrue(ask["WFWorkflowActionParameters"]["WFAllowsMultilineText"])
+
+    def test_native_check_blank_note_and_empty_capture(self):
+        workflow, _ = build_wiring_check.build_check(self.folder / "empty fixture", comment="", empty_capture=True)
+        actions = workflow["WFWorkflowActions"]
+        self.assertEqual(actions[0]["WFWorkflowActionParameters"]["Script"], ":")
+        self.assertEqual(actions[3]["WFWorkflowActionParameters"]["WFTextActionText"], "")
+
+    def test_native_check_rejects_negative_delay(self):
+        with self.assertRaises(ValueError):
+            build_wiring_check.build_check(self.folder / "invalid fixture", delay=-1)
+        self.assertFalse((self.folder / "invalid fixture").exists())
+
+
+class CapturePermissionTests(unittest.TestCase):
+    def test_allowed_access_uses_read_only_preflight(self):
+        with patch("screenshot_note.sys.platform", "darwin"), patch("screenshot_note.ctypes.CDLL") as load:
+            preflight = load.return_value.CGPreflightScreenCaptureAccess
+            preflight.return_value = True
+            app.ensure_capture_access()
+            preflight.assert_called_once_with()
+            self.assertEqual(preflight.argtypes, [])
+            self.assertEqual(preflight.restype, app.ctypes.c_bool)
+            load.assert_called_once_with("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+
+    def test_denied_access_reports_invoking_app_and_saves_nothing(self):
+        with patch("screenshot_note.sys.platform", "darwin"), patch("screenshot_note.ctypes.CDLL") as load:
+            load.return_value.CGPreflightScreenCaptureAccess.return_value = False
+            with self.assertRaisesRegex(app.ScreenshotError, "app invoking this Shortcut") as caught:
+                app.ensure_capture_access()
+            self.assertIn("No screenshot was saved", str(caught.exception))
+            self.assertIn("not just Shortcuts", str(caught.exception))
+
+    def test_unavailable_preflight_fails_closed(self):
+        for error in (OSError("unavailable"), AttributeError("missing API")):
+            with self.subTest(error=error), patch("screenshot_note.sys.platform", "darwin"), patch("screenshot_note.ctypes.CDLL", side_effect=error):
+                with self.assertRaisesRegex(app.ScreenshotError, "no capture was started"):
+                    app.ensure_capture_access()
+
+    def test_non_macos_test_runtime_does_not_load_framework(self):
+        with patch("screenshot_note.sys.platform", "linux"), patch("screenshot_note.ctypes.CDLL") as load:
+            app.ensure_capture_access()
+            load.assert_not_called()
+
+    def test_denied_access_precedes_directory_creation_and_capture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "must not be created"
+            with patch("screenshot_note.ensure_capture_access", side_effect=app.ScreenshotError("permission missing")), patch("screenshot_note.subprocess.run") as run:
+                with self.assertRaisesRegex(app.ScreenshotError, "permission missing"):
+                    app.capture(destination)
+            run.assert_not_called()
+            self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":

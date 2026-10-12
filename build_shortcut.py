@@ -31,7 +31,7 @@ def build():
     if info_path.exists():
         with info_path.open("rb") as file:
             client_version = plistlib.load(file)["CFBundleVersion"]
-    capture_id, ask_id, text_id, group_id = (str(uuid.uuid4()).upper() for _ in range(4))
+    capture_id, path_id, ask_id, text_id, group_id = (str(uuid.uuid4()).upper() for _ in range(5))
     shell = {"Shell": "/bin/zsh", "InputMode": "to stdin", "RunAsRoot": False}
     capture = action("is.workflow.actions.runshellscript", {
         **shell, "UUID": capture_id,
@@ -41,6 +41,20 @@ def build():
         "GroupingIdentifier": group_id, "WFControlFlowMode": 0,
         "WFInput": {"Type": "Variable", "Variable": attachment(capture_id, "Shell Script Result")},
         "WFCondition": 100,  # Has Any Value; cancelled captures have no output.
+    })
+    # Shell output is file-backed by Shortcuts. Resolve it to an NSString now,
+    # while its temporary representation still exists, not after a long prompt.
+    path_text = action("is.workflow.actions.gettext", {
+        "UUID": path_id,
+        "WFTextActionText": {
+            "WFSerializationType": "WFTextTokenString",
+            "Value": {
+                "string": "\ufffc",
+                "attachmentsByRange": {
+                    "{0, 1}": output(capture_id, "Shell Script Result"),
+                },
+            },
+        },
     })
     ask = action("is.workflow.actions.ask", {
         "UUID": ask_id, "WFAskActionPrompt": "Note for this screenshot?",
@@ -54,7 +68,7 @@ def build():
             "Value": {
                 "string": "\ufffc\n\ufffc",
                 "attachmentsByRange": {
-                    "{0, 1}": output(capture_id, "Shell Script Result"),
+                    "{0, 1}": output(path_id, "Text"),
                     "{2, 1}": output(ask_id, "Provided Input"),
                 },
             },
@@ -81,7 +95,7 @@ def build():
         # receiver (e.g. a browser page rather than an editable text field).
         "WFWorkflowOutputContentItemClasses": [],
         "WFWorkflowHasShortcutInputVariables": False,
-        "WFWorkflowActions": [capture, condition, ask, payload, save, end],
+        "WFWorkflowActions": [capture, condition, path_text, ask, payload, save, end],
     }
 
 

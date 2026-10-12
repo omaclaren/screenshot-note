@@ -84,6 +84,15 @@ In Shortcuts:
    Scripts** yourself. This is an app-wide permission, not permission for this
    one Shortcut. Handle any macOS screen-recording permission prompt yourself.
 
+The helper checks Screen Recording access before starting capture; it does not
+request or grant access. When invoked through an app's Services menu or hotkey,
+macOS may attribute capture to **the invoking app**, rather than Shortcuts. If
+it reports missing access, enable that app under **System Settings → Privacy &
+Security → Screen Recording** only if you wish to grant it permission. Quit and
+reopen the app if macOS requires it. Without access, macOS can otherwise save
+only wallpaper while omitting application windows, even when capture appears
+to succeed.
+
 Signing makes the local workflow importable; it does not publish your screenshots
 or comments. The repository excludes generated signed workflows because they
 may contain signing metadata. Build yours locally.
@@ -92,6 +101,13 @@ Opening a rebuilt workflow with the same name may reopen the existing Shortcut
 rather than update its actions. Check that its condition reads **If Shell Script
 Result has any value**, not **If Input**. Preserve a working copy before replacing
 an installed workflow.
+
+The current workflow has seven actions. Inside the conditional, a **Text**
+action converts the captured path to plain text **before Ask for Input**; the
+later payload uses that Text result, not the original Shell Script Result.
+This avoids re-reading Shortcuts' temporary shell-output file after a long-open
+dialog. Updating the helper alone does not add this action: rebuild and update
+the installed workflow too.
 
 ## Use
 
@@ -105,6 +121,8 @@ hotkey before finishing the selection. Enter your comment and confirm it.
 - **Comment text:** preserve multiline UTF-8 text without interpreting shell
   expressions, backticks or other content as code.
 - **Note-writing failure:** report the error and leave the captured image intact.
+- **Missing Screen Recording access:** report an error before capture; no
+  screenshot or note is saved.
 
 Holding Control during native capture can send the image to the clipboard. No
 note is created if no image file was captured.
@@ -132,7 +150,8 @@ checks that the image is in that folder; it does not relocate the note.
 
 Tests mock capture instead of taking screenshots. They cover destination
 preferences and overrides, cancellation, collisions, symlinks, UTF-8 and
-multiline comments, relative image links, and the generated workflow wiring.
+multiline comments, relative image links, read-only permission preflight, and
+the generated workflow wiring.
 They do not replace a real keypress/capture/comment test on your macOS version.
 
 `build_wiring_check.py` can generate a native Shortcuts regression check using a
@@ -150,8 +169,16 @@ shortcuts run "Screenshot Note Wiring Check"
 ```
 
 The builder prints the fixture folder. Check its PNG/Markdown pair and remove the
-temporary Shortcut and fixture folder when finished. Use a distinct name when
-retesting to avoid accidentally running an older installed check.
+temporary Shortcut and fixture folder when finished. Use a distinct filename
+and matching `--name` when retesting to avoid running an older installed check.
+
+For a path-lifetime check, add `--delay 180` to pause after the path has been
+materialised but before the synthetic note. Generate two checks with distinct
+names and run them concurrently to exercise overlapping executions. Use
+`--interactive` to retain the real multiline prompt with the synthetic image,
+leave it open for at least three minutes, and submit a test comment. Neither
+mode takes a screen capture. `--empty-capture` checks that the cancelled-capture
+branch never reaches the note writer; `--comment ""` checks blank comments.
 
 ## Privacy
 
